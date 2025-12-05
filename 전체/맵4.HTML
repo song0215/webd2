@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Scrolling Map — 정확한 카메라/아이템 상호작용</title>
+<style>
+  :root { --game-w:1200px; --game-h:800px; }
+
+  body {
+    display:flex; align-items:center; justify-content:center;
+    height:100vh; margin:0; background:#000000; font-family:system-ui, "Noto Sans KR", sans-serif;
+  }
+
+  /* 게임 영역 (화면에 보이는 부분) */
+  .game-wrap {
+    width:var(--game-w);
+    height:var(--game-h);
+    position:relative;
+    overflow:hidden;
+    box-shadow:0 8px 30px rgba(20,30,60,0.12);
+    background:#7e7e7e;
+        border-radius: 1vw;
+  }
+
+  /* 실제 월드(맵) — 이 요소가 translateX로 스크롤 됨 */
+.map {
+  position:absolute;
+  left:0;
+  top:0;
+  width:3400px;    /* 가로 5000px 월드 */
+  height:100%;
+  background-color:#858585;
+  background: url("map_big.png") no-repeat;
+  background-size: contain;   /* 이미지 비율 유지하면서 표시 */
+  image-rendering: pixelated; /* 선택사항 */
+}
+
+  /* 지면 */
+  .ground {
+    position:absolute; left:0; right:0; bottom:0; height:130px;
+    background:#383838;
+    box-shadow: inset 0 6px 12px rgba(0,0,0,0.12);
+  }
+
+  /* 플레이어(화면 기준 위치로 보정) */
+.player {
+  position: absolute;
+  width: 150px;
+  height: 320px;
+  bottom: 130px;
+  left: calc(50% -100px);
+  background-color: #000000;
+  background-image: url('player_idle.png'); /* 정지 시 기본 프레임 */
+  background-size: auto 100%;
+  image-rendering: pixelated;
+  will-change: background-position;
+}
+
+/* 방향 전환 */
+.player.facing-left {
+  transform: scaleX(-1);
+}
+
+  /* 아이템 (월드 좌표) */
+  .item {
+    position:absolute;
+    bottom:130px; /* 지면 위 */
+    width:40px; height:40px;
+    border-radius:8px;
+    background:#ffd55c;
+    display:flex; align-items:center; justify-content:center;
+    box-shadow:0 4px 8px rgba(0,0,0,0.12);
+  }
+  
+  .item .exclaim {
+    position:absolute; top:-30px; left:8px;
+    font-weight:900; font-size:26px; color:#ff2e2e;
+    opacity:0; transition:opacity 0.18s;
+    text-shadow:0 2px 6px rgba(0,0,0,0.25);
+    pointer-events:none;
+  }
+
+.door {
+  position:absolute;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.door .exclaim {
+  position:absolute; top:-34px;
+  font-weight:900; font-size:30px; color:#ff2e2e;
+  opacity:0; transition:opacity .18s;
+  pointer-events:none;
+}
+
+  /* 화면 하단 고정 대화박스 (position:fixed 이 아니라 화면 영역에 고정하려면 아래처럼) */
+  .ui-dialog {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    height: 84px;
+    background: rgba(0,0,0,0.7);
+    color: #fff;
+    display:flex; align-items:center; justify-content:center;
+    font-size:20px;
+    box-sizing:border-box;
+    padding:10px;
+    opacity:0;
+    transition: opacity .18s;
+    pointer-events:none;
+  }
+  .ui-dialog.show { opacity:1; pointer-events:auto; }
+
+  /* ★ 문 상호작용 애니메이션: 머리 흔들기 */
+.player.knock .head {
+  animation: head-knock 0.45s ease-in-out 3;
+}
+
+@keyframes head-knock {
+  0% { transform: rotate(0deg); }
+  25% { transform: rotate(12deg); }
+  50% { transform: rotate(0deg); }
+  75% { transform: rotate(-12deg); }
+  100% { transform: rotate(0deg); }
+}
+
+  /* 약간의 안내 HUD */
+  .hud { position:absolute; left:10px; top:8px; font-size:13px; color:#064; }
+
+</style>
+</head>
+<body>
+  <div class="game-wrap" id="game" tabindex="0" aria-label="게임영역">
+    <div class="map" id="map">
+      <div class="ground"></div>
+
+      <!-- 테스트 아이템들 (left 값 = worldX px) -->
+      <div class="item" id="item1" style="left:1060px; width:330px; height:240px;">
+        <div class="exclaim">!</div>
+      </div>
+
+      <div class="item" id="item2" style="left:280px; background:#9ad6ff; width:320px; height:240px;">
+        <div class="exclaim">!</div>
+      </div>
+      
+      <div class="item" id="item3" style="left: 790px; background:#d79aff; width:100px; height:100px;">
+        <div class="exclaim">!</div>
+      </div>
+
+      <!-- 필요하면 더 많은 아이템 추가 -->
+       <div class="door" id="door1" style="left:2300px; bottom:130px; width:240px; height: 400px;
+     background:#885522; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.2);">
+  <div class="exclaim">!</div>
+</div>
+    </div>
+
+    <!-- 플레이어: 화면상 위치는 스크립트에서 조절(기본은 중앙) -->
+<div class="player" id="player" role="img" aria-label="플레이어"></div>
+
+    <div class="hud">A / D : 좌우 이동 · Space : 상호작용</div>
+
+    <!-- 화면 아래 고정되는 대화박스 (게임 영역 내부에 두어 게임 화면 크기에 맞춰 고정) -->
+<div class="ui-dialog" id="dialog">
+  <span id="dialogText"></span>
+  <button id="dialogSwapBtn" style="margin-left:12px; display:none;">바꾸기</button>
+</div>
+<audio id="knockSound" src="knock.mp3"></audio>
+<script>
+(() => {
+  const game = document.getElementById('game');
+  const map = document.getElementById('map');
+  const player = document.getElementById('player');
+  const dialog = document.getElementById('dialog');
+  const knockSound = document.getElementById('knockSound');
+
+  const WORLD_WIDTH = map.offsetWidth;
+  const SCREEN_WIDTH = game.clientWidth;
+  const SPEED = 240;
+
+  // 플레이어 히트박스 크기 / 오프셋
+  const PLAYER_W = 170;
+  const PLAYER_H = 320;
+
+  let worldX = 710;
+  let keys = { left:false, right:false };
+  let dialogOpenIndex = null;
+
+  const items = [
+    { el: document.getElementById('item1'), text: '약' },
+    { el: document.getElementById('item2'), text: '테스트: 아이템 2' },
+    { el: document.getElementById('item3'), text: '쓰래기' }
+  ];
+  const door = document.getElementById('door1');
+  let doorClickable = false;
+
+  /* ───────────── AABB 충돌 ───────────── */
+  function hit(a, b) {
+    return (
+      a.left < b.right &&
+      a.right > b.left &&
+      a.top < b.bottom &&
+      a.bottom > b.top
+    );
+  }
+
+  /* ───────────── 히트박스 계산 ───────────── */
+function getPlayerHB() {
+  const screenX = parseFloat(player.style.left);
+  const screenY = game.clientHeight - 100 - PLAYER_H;
+  
+  const centerX = screenX + (player.offsetWidth / 2); // 플레이어 중심
+  const halfHB = PLAYER_W / 2; // 히트박스 절반
+
+  return {
+    left: centerX - halfHB,
+    right: centerX + halfHB,
+    top: screenY,
+    bottom: screenY + PLAYER_H
+  };
+}
+  function getObjHB(el) {
+    const rect = el.getBoundingClientRect();
+    const g = game.getBoundingClientRect();
+    return {
+      left: rect.left - g.left,
+      right: rect.right - g.left,
+      top: rect.top - g.top,
+      bottom: rect.bottom - g.top
+    };
+  }
+
+  /* ───────────── 카메라/스크롤 ───────────── */
+  function applyCamera() {
+    const leftLimit = SCREEN_WIDTH * 0.5;
+    const rightLimit = WORLD_WIDTH - SCREEN_WIDTH * 0.5;
+    let scrollX, screenX;
+    if (worldX < leftLimit) {
+      scrollX = 0; screenX = worldX;
+    } else if (worldX > rightLimit) {
+      scrollX = SCREEN_WIDTH - WORLD_WIDTH;
+      screenX = worldX + scrollX;
+    } else {
+      scrollX = Math.round(SCREEN_WIDTH * 0.5 - worldX);
+      screenX = SCREEN_WIDTH * 0.5 - PLAYER_W / 2;
+    }
+    map.style.transform = `translateX(${scrollX}px)`;
+    player.style.left = `${screenX}px`;
+  }
+
+  /* ───────────── UI ───────────── */
+function openDialog(i, showSwap = false) {
+  dialogOpenIndex = i;
+  dialogText.textContent = items[i].text;
+  dialog.classList.add("show");
+
+  if (showSwap) {
+    swapTargetItem = items[i];
+    swapBtn.style.display = "block";
+  } else {
+    swapBtn.style.display = "none";
+  }
+}
+function closeDialog() {
+  dialogOpenIndex = null;
+  dialog.classList.remove("show");
+  swapBtn.style.display = "none";
+  swapTargetItem = null;
+}
+  let swapTargetItem = null;
+const dialogText = document.getElementById("dialogText");
+const swapBtn = document.getElementById("dialogSwapBtn");
+
+  /* ───────────── 입력 ───────────── */
+  window.addEventListener("keydown", e => {
+    if (["a","A","ArrowLeft"].includes(e.key)) keys.left = true;
+    if (["d","D","ArrowRight"].includes(e.key)) keys.right = true;
+    if (e.code === "Space") {
+      const ph = getPlayerHB();
+      let interacted = false;
+      items.forEach((it, i) => {
+        if (hit(ph, getObjHB(it.el))) {
+  if (dialogOpenIndex === i) closeDialog();
+  else {
+    const replaceable = (i === 0); // ← item1만 교체 예시 (원하면 조건 수정)
+    openDialog(i, replaceable);
+  }
+  interacted = true;
+}
+      });
+      if (!interacted) closeDialog();
+    }
+  });
+  window.addEventListener("keyup", e => {
+    if (["a","A","ArrowLeft"].includes(e.key)) keys.left = false;
+    if (["d","D","ArrowRight"].includes(e.key)) keys.right = false;
+  });
+
+/* ───────────── 개별 프레임 걷기 애니메이션 ───────────── */
+const walkFrames = [
+  "walk1.png",
+  "walk2.png",
+  "walk3.png",
+  "walk4.png",
+  "walk5.png",
+  "walk6.png"
+]; // 프레임 갯수 맞춰서 수정 가능
+
+let walkTimer = null;
+let walkIndex = 0;
+
+/* ───────────── 개별 프레임 노크 애니메이션 ───────────── */
+const knockFrames = [
+  "knock1.png",
+  "knock2.png",
+  "knock3.png",
+  "knock4.png",
+  "knock5.png"
+];
+let knockTimer = null;
+let knockIndex = 0;
+
+function startWalkAnim() {
+  if (walkTimer) return; // 중복 방지
+  walkTimer = setInterval(() => {
+    walkIndex = (walkIndex + 1) % walkFrames.length;
+    player.style.backgroundImage = `url(${walkFrames[walkIndex]})`;
+  }, 100); // 속도 조절 가능 (100ms = 0.1초)
+}
+
+function stopWalkAnim() {
+  clearInterval(walkTimer);
+  walkTimer = null;
+  walkIndex = 0;
+  player.style.backgroundImage = `url('player_idle.png')`; // 정지 기본 프레임
+}
+// ★★★ 노크 ★★★
+function startKnockAnim(callback) {
+  stopWalkAnim();
+  knockIndex = 0;
+
+  knockTimer = setInterval(() => {
+    knockIndex++;
+    if (knockIndex >= knockFrames.length) {
+      clearInterval(knockTimer);
+      knockTimer = null;
+      player.style.backgroundImage = `url('player_idle.png')`;
+      if (callback) callback();
+    } else {
+      player.style.backgroundImage = `url(${knockFrames[knockIndex]})`;
+    }
+  }, 90);
+}
+
+  /* ───────────── 메인 루프 ───────────── */
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now-last)/1000);
+    last = now;
+
+    // 이동
+    if (keys.left) worldX -= SPEED * dt;
+    if (keys.right) worldX += SPEED * dt;
+
+    // 월드 경계 충돌
+const LEFT_MARGIN = 685;
+const RIGHT_MARGIN = 130;
+
+worldX = Math.max(
+  LEFT_MARGIN,
+  Math.min(WORLD_WIDTH - PLAYER_W - RIGHT_MARGIN, worldX)
+);
+
+    // 카메라/플레이어 화면 갱신
+    applyCamera();
+
+    // 애니메이션
+if (keys.left || keys.right) {
+  player.classList.add("walk");
+  startWalkAnim();
+} else {
+  player.classList.remove("walk");
+  stopWalkAnim();
+}
+    if (keys.left && !keys.right) player.classList.add("facing-left");
+    if (keys.right && !keys.left) player.classList.remove("facing-left");
+
+    const ph = getPlayerHB();
+
+    // 아이템 상호작용 히트박스
+    items.forEach((it, i) => {
+      const ex = it.el.querySelector(".exclaim");
+      if (hit(ph, getObjHB(it.el))) {
+        ex.style.opacity = 1;
+      } else {
+        ex.style.opacity = 0;
+        if (dialogOpenIndex === i) closeDialog();
+      }
+    });
+
+    // 문 상호작용 히트박스
+const doorEx = door.querySelector(".exclaim");
+const touchingDoor = hit(ph, getObjHB(door));
+doorEx.style.opacity = touchingDoor ? 1 : 0;
+door.style.cursor = touchingDoor ? "pointer" : "default";
+doorClickable = touchingDoor;   // ★ 요거 하나
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // 문 클릭 이벤트
+door.addEventListener("dblclick", () => {
+  if (!doorClickable) return;
+
+  const doorWorldLeft = parseFloat(door.style.left);
+  const doorWorldWidth = door.offsetWidth;
+  const targetX = doorWorldLeft + doorWorldWidth / 2 - PLAYER_W / 2 + 90;
+
+  moveToDoor(targetX, () => {
+    knockSound.currentTime = 0;
+    knockSound.play();
+
+    // ★ 기존 player.classList.add("knock"); 대신!
+    startKnockAnim(() => {
+      setTimeout(() => {
+        window.location.href = "https://youtu.be/jg9rolgOppM?si=Am4-9YRNg-Hb0pi1";
+      }, 300);
+    });
+  });
+});
+function moveToDoor(targetX, callback) {
+  const interval = setInterval(() => {
+    const dx = targetX - worldX;
+
+    // 거의 도착하면 고정
+    if (Math.abs(dx) < 1) {
+      worldX = targetX;
+      clearInterval(interval);
+      if (callback) callback();
+      return;
+    }
+
+    // 부드럽게 다가가기
+    worldX += dx * 0.12; // 숫자 낮으면 천천히, 높으면 빠르게
+  }, 16);
+}
+
+swapBtn.addEventListener("click", () => {
+  if (!swapTargetItem) return;
+
+  // 기존 아이템 숨기기
+  swapTargetItem.el.style.display = "none";
+
+  // 새 아이템 생성
+  const newItem = document.createElement("div");
+  newItem.className = "item";
+  newItem.style.left = swapTargetItem.el.style.left;
+  newItem.style.bottom = "130px";
+  newItem.style.width = "330px";
+  newItem.style.height = "240px";
+  newItem.style.background = "#00ffb3";
+
+  const ex = document.createElement("div");
+  ex.className = "exclaim";
+  ex.textContent = "!";
+  newItem.appendChild(ex);
+
+  map.appendChild(newItem);
+
+  // items 배열에 등록 (교체 끝)
+  items.push({ el: newItem, text: "없다" });
+
+  closeDialog();
+});
+  game.focus();
+})();
+
+</script>
+
+</body>
+</html>
